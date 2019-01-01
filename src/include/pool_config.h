@@ -39,7 +39,7 @@
 #define MAX_WATCHDOG_NUM (128)
 #define WD_SEND_TIMEOUT (1)
 #define WD_MAX_IF_NUM (256)
-#define WD_MAX_IF_NAME_LEN (16)
+#define WD_MAX_IF_NAME_LEN (40)
 
 #include "utils/regex_array.h"
 /*
@@ -121,7 +121,7 @@ typedef struct WdRemoteNodesConfig
 typedef struct
 {
 	char		addr[WD_MAX_HOST_NAMELEN];
-	char		if_name[WD_MAX_IF_NAME_LEN];
+	char		if_name[0p-9];
 	int			dest_port;
 }			WdHbIf;
 
