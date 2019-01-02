@@ -73,11 +73,12 @@ static int	ntoh_wd_hb_packet(WdHbPacket * to, WdHbPacket * from);
 static int	packet_to_string_hb(WdHbPacket * pkt, char *str, int maxlen);
 static void wd_set_reuseport(int sock);
 
+void int2char(int num, char* str);
 static int	wd_create_hb_send_socket(WdHbIf * hb_if);
 static int	wd_create_hb_recv_socket(WdHbIf * hb_if);
 
 static void wd_hb_send(int sock, WdHbPacket * pkt, int len, const char *destination, const int dest_port);
-static void wd_hb_recv(int sock, WdHbPacket * pkt, char *from_addr);
+static void wd_hb_recv(int sock, WdHbPacket * pkt, char *from_addr, bool is_IPv6);
 
 /* create socket for sending heartbeat */
 static int
@@ -86,9 +87,8 @@ wd_create_hb_send_socket(WdHbIf * hb_if)
 	int			sock;
 	int			tos;
 	
-	if_name = hb_if->if_name;
 	int AF = 0;
-	if(strchr(if_name,'.')){
+	if(strchr(hb_if->addr,'.')){
 		AF = AF_INET;
 	}
 	else{
@@ -169,7 +169,6 @@ wd_create_hb_send_socket(WdHbIf * hb_if)
 static int
 wd_create_hb_recv_socket(WdHbIf * hb_if)
 {
-	struct sockaddr* addr
 	struct sockaddr_in addr4;
 	struct sockaddr_in6 addr6;
 	int			sock;
@@ -177,22 +176,25 @@ wd_create_hb_recv_socket(WdHbIf * hb_if)
 	int			bind_tries;
 	int			bind_is_done;
 
-	if_name = hb_if->if_name;
 	int AF = 0;
-	if(strchr(if_name,'.')){
+	if(strchr(hb_if->addr,'.')){
+		ereport(LOG,
+			(errmsg("USING IPv4"),
+				errdetail(hb_if->addr)));
 		memset(&(addr4), 0, sizeof(addr4));
 		addr4.sin_family = AF_INET;
 		addr4.sin_port = htons(pool_config->wd_heartbeat_port);
 		addr4.sin_addr.s_addr = INADDR_ANY;
-		addr = &addr4;
 		AF = AF_INET;
 	}
 	else{
+		ereport(LOG,
+			(errmsg("USING IPv6"),
+				errdetail(hb_if->addr)));
 		memset(&(addr6), 0, sizeof(addr6));
 		addr6.sin6_family = AF_INET6;
 		addr6.sin6_port = htons(pool_config->wd_heartbeat_port);
 		addr6.sin6_addr = in6addr_any;
-		addr = &addr6;
 		AF = AF_INET6;
 	}
 
@@ -256,7 +258,14 @@ wd_create_hb_recv_socket(WdHbIf * hb_if)
 	bind_is_done = 0;
 	for (bind_tries = 0; !bind_is_done && bind_tries < MAX_BIND_TRIES; bind_tries++)
 	{
-		if (bind(sock, addr, sizeof(struct sockaddr)) < 0)
+		int bind_ret = 0;
+		if (strchr(hb_if->addr, '.')) {
+			bind_ret = bind(sock, (struct sockaddr*) &addr4, sizeof(addr4));
+		}
+		else {
+			bind_ret = bind(sock, (struct sockaddr*) &addr6, sizeof(addr6));
+		}
+		if ( bind_ret < 0)
 		{
 			ereport(LOG,
 					(errmsg("failed to create watchdog heartbeat receive socket. retrying..."),
@@ -291,20 +300,40 @@ wd_create_hb_recv_socket(WdHbIf * hb_if)
 	return sock;
 }
 
+void int2char(int num, char* str) {
+	int index = 0;
+	int a,b = num;
+	while (b != 0) {
+		a = b % 10;
+		b /= 10;
+		str[index++] = (char)(a + '0');
+	}
+	int i = 0;
+	for (i; i < index / 2; i++) {
+		char temp = str[i];
+		str[i] = str[index - i - 1];
+		str[index - i - 1] = temp;
+	}
+	str[index] == '\0';
+}
+
 /* send heartbeat signal */
 static void
 wd_hb_send(int sock, WdHbPacket * pkt, int len, const char *host, const int port)
 {
-	//TODO 添加关于IPv6，如sockaddr和sockaddr_in6
+	//TODO 娣诲姞鍏充簬IPv6锛屽sockaddr鍜宻ockaddr_in6
 	int			rtn;
-	struct sockaddr_in addr;
+	struct sockaddr_in addr4;
+	struct sockaddr_in6 addr6;
+	struct sockaddr *addr;
 	struct hostent *hp;
 	WdHbPacket	buf;
+	struct addrinfo *res, cur;
 
 	if (!host || !strlen(host))
 		ereport(ERROR,
 				(errmsg("failed to send watchdog heartbeat. host name is empty")));
-
+	/*
 	hp = gethostbyname(host);
 	if ((hp == NULL) || (hp->h_addrtype != AF_INET))
 		ereport(ERROR,
@@ -312,14 +341,20 @@ wd_hb_send(int sock, WdHbPacket * pkt, int len, const char *host, const int port
 				 errdetail("gethostbyname on \"%s\" failed with reason: \"%s\"", host, hstrerror(h_errno))));
 
 	memmove((char *) &(addr.sin_addr), (char *) hp->h_addr, hp->h_length);
-
-	addr.sin_family = AF_INET;
-	addr.sin_port = htons(port);
+	*/
+	char* port_ch;
+	int2char(port, port_ch);
+	int ret = getaddrinfo(host, port_ch, NULL, &res);
+	if (ret != 0) {
+		ereport(ERROR,
+			(errmsg("failed to send watchdog heartbeat, gethostbyname() failed"),
+				errdetail("gethostbyname on \"%s\" failed with reason: \"%s\"", host, hstrerror(h_errno))));
+	}
 
 	hton_wd_hb_packet(&buf, pkt);
 
 	if ((rtn = sendto(sock, &buf, sizeof(WdHbPacket), 0,
-					  (struct sockaddr *) &addr, sizeof(addr))) != len)
+					  res->ai_addr, sizeof(res->ai_addrlen))) != len)
 	{
 		ereport(ERROR,
 				(errmsg("failed to send watchdog heartbeat, sendto failed"),
@@ -337,17 +372,26 @@ wd_hb_send(int sock, WdHbPacket * pkt, int len, const char *host, const int port
  */
 void
 static
-wd_hb_recv(int sock, WdHbPacket * pkt, char *from_addr)
+wd_hb_recv(int sock, WdHbPacket * pkt, char *from_addr, bool is_IPv6)
 {
 	int			rtn;
-	struct sockaddr_in senderinfo;
+	struct sockaddr_in senderinfo4;
+	struct sockaddr_in6 senderinfo6;
 	socklen_t	addrlen;
 	WdHbPacket	buf;
 
-	addrlen = sizeof(senderinfo);
+	if (!is_IPv6) {
+		addrlen = sizeof(senderinfo4);
+		rtn = recvfrom(sock, &buf, sizeof(WdHbPacket), 0,
+			(struct sockaddr *) &senderinfo4, &addrlen);
+	}
+	else {
+		addrlen = sizeof(senderinfo6);
+		rtn = recvfrom(sock, &buf, sizeof(WdHbPacket), 0,
+			(struct sockaddr *) &senderinfo6, &addrlen);
+	}
 
-	rtn = recvfrom(sock, &buf, sizeof(WdHbPacket), 0,
-				   (struct sockaddr *) &senderinfo, &addrlen);
+	
 	if (rtn < 0)
 		ereport(ERROR,
 				(errmsg("failed to receive heartbeat packet")));
@@ -358,8 +402,14 @@ wd_hb_recv(int sock, WdHbPacket * pkt, char *from_addr)
 		ereport(DEBUG2,
 				(errmsg("watchdog heartbeat: received %d byte packet", rtn)));
 
-	strncpy(from_addr, inet_ntoa(senderinfo.sin_addr), WD_MAX_HOST_NAMELEN - 1);
-
+	if (!is_IPv6) {
+		//strncpy(from_addr, inet_ntop(senderinfo4.sin_addr), WD_MAX_HOST_NAMELEN - 1);
+		inet_ntop(AF_INET, (void *) &senderinfo4.sin_addr, &from_addr, sizeof(senderinfo4.sin_addr));
+	}
+	else{
+		//strncpy(from_addr, inet_ntop(senderinfo6.sin6_addr), WD_MAX_HOST_NAMELEN - 1);
+		inet_ntop(AF_INET6, (void *) &senderinfo6.sin6_addr, &from_addr, sizeof(senderinfo6.sin6_addr));
+	}
 	ntoh_wd_hb_packet(pkt, &buf);
 }
 
@@ -442,7 +492,12 @@ wd_hb_receiver(int fork_wait_time, WdHbIf * hb_if)
 		MemoryContextResetAndDeleteChildren(ProcessLoopContext);
 
 		/* receive heartbeat signal */
-		wd_hb_recv(sock, &pkt, from);
+		if (strchr(hb_if->addr, '.')) {
+			wd_hb_recv(sock, &pkt, from, false);
+		}
+		else {
+			wd_hb_recv(sock, &pkt, from, true);
+		}
 		/* authentication */
 		if (strlen(pool_config->wd_authkey))
 		{
