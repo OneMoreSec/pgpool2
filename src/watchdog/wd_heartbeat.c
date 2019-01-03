@@ -347,8 +347,8 @@ wd_hb_send(int sock, WdHbPacket * pkt, int len, const char *host, const int port
 	int ret = getaddrinfo(host, port_ch, NULL, &res);
 	if (ret != 0) {
 		ereport(ERROR,
-			(errmsg("failed to send watchdog heartbeat, gethostbyname() failed"),
-				errdetail("gethostbyname on \"%s\" failed with reason: \"%s\"", host, hstrerror(h_errno))));
+			(errmsg("failed to send watchdog heartbeat, getaddrinfo() failed"),
+				errdetail("getaddrinfo on \"%s\" failed with reason: \"%s\"", host, hstrerror(h_errno))));
 	}
 
 	hton_wd_hb_packet(&buf, pkt);

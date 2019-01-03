@@ -766,12 +766,21 @@ static int
 wd_create_recv_socket(int port)
 {
 	size_t		len = 0;
-	struct sockaddr_in addr;
+	struct sockaddr_in addr4;
+	struct sockaddr_in6 addr6;
 	int			one = 1;
 	int			sock = -1;
 	int			saved_errno;
 
-	if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0)
+	int AF = 0;
+	if(strchr(hb_if->addr,'.')){
+		AF = AF_INET;
+	}
+	else{
+		AF = AF_INET6;
+	}
+
+	if ((sock = socket(AF, SOCK_STREAM, 0)) < 0)
 	{
 		/* socket create failed */
 		ereport(ERROR,
@@ -809,12 +818,25 @@ wd_create_recv_socket(int port)
 				 errdetail("setsockopt(SO_KEEPALIVE) failed with reason: \"%s\"", strerror(saved_errno))));
 	}
 
-	addr.sin_family = AF_INET;
-	addr.sin_addr.s_addr = htonl(INADDR_ANY);
-	addr.sin_port = htons(port);
-	len = sizeof(struct sockaddr_in);
+	//bind different sockaddr depending on host
+	int ret = 0;
+	if(strchr(hb_if->addr,'.')){
+		addr4.sin_family = AF_INET;
+		addr4.sin_addr.s_addr = htonl(INADDR_ANY);
+		addr4.sin_port = htons(port);
+		len = sizeof(struct sockaddr_in);
+		ret = bind(sock, (struct sockaddr *) &addr4, len);
+	}
+	else{
+		addr6.sin6_family = AF_INET6;
+		addr6.sin6_port = htons(port);
+		addr6.sin6_addr = in6addr_any;
+		len = sizeof(struct sockaddr_in6);
+		ret = bind(sock, (struct sockaddr *) &addr6, len);
+	}
 
-	if (bind(sock, (struct sockaddr *) &addr, len) < 0)
+
+	if ( ret < 0)
 	{
 		/* bind failed */
 		saved_errno = errno;
@@ -854,7 +876,16 @@ wd_create_client_socket(char *hostname, int port, bool *connected)
 
 	*connected = false;
 	/* create socket */
-	if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0)
+	//check whether hostname is IPv4 or IPv6
+	int AF = 0;
+	if(strchr(hostname,'.')){
+		//IPv4
+		AF = AF_INET;
+	}
+	else{
+		AF = AF_INET6;
+	}
+	if ((sock = socket(AF, SOCK_STREAM, 0)) < 0)
 	{
 		/* socket create failed */
 		ereport(LOG,
@@ -879,30 +910,27 @@ wd_create_client_socket(char *hostname, int port, bool *connected)
 		close(sock);
 		return -1;
 	}
-	/* set sockaddr_in */
-	memset(&addr, 0, sizeof(addr));
-	addr.sin_family = AF_INET;
-	hp = gethostbyname(hostname);
-	if ((hp == NULL) || (hp->h_addrtype != AF_INET))
+	/* get addrinfo */
+	char* portstr;
+	if (asprintf(&portstr, "%d", port) == -1)
 	{
-		hp = gethostbyaddr(hostname, strlen(hostname), AF_INET);
-		if ((hp == NULL) || (hp->h_addrtype != AF_INET))
-		{
-			ereport(LOG,
-					(errmsg("failed to get host address for \"%s\"", hostname),
-					 errdetail("gethostbyaddr failed with error: \"%s\"", hstrerror(h_errno))));
-			close(sock);
-			return -1;
-		}
+		ereport(FATAL,
+				(errmsg("failed to create INET domain socket"),
+				 errdetail("asprintf() failed: %s", strerror(errno))));
 	}
-	memmove((char *) &(addr.sin_addr), (char *) hp->h_addr, hp->h_length);
-	addr.sin_port = htons(port);
-	len = sizeof(struct sockaddr_in);
-
-	/* set socket to non blocking */
+	struct addrinfo hint;
+	hint.ai_family = AF_UNSPEC;
+	hint,ai_socktype = SOCK_STREAM;
+	struct addrinfo* res;
+	int ret = getaddrinfo(hostname,portstr,hint,&res);
+	if (ret != 0) {
+		ereport(ERROR,
+			(errmsg("failed to get watchdog host, getaddrinfo() failed"),
+				errdetail("getaddrinfo on \"%s\" failed with reason: \"%s\"", host, hstrerror(h_errno))));
+	}
+	len = ai_addrlen;
 	pool_set_nonblock(sock);
-
-	if (connect(sock, (struct sockaddr *) &addr, len) < 0)
+	if (connect(sock, res->ai_addr, len) < 0)
 	{
 		if (errno == EINPROGRESS)
 		{
@@ -925,6 +953,8 @@ wd_create_client_socket(char *hostname, int port, bool *connected)
 	*connected = true;
 	return sock;
 }
+
+
 
 /* returns the number of successfull connections */
 static int
